@@ -17,7 +17,7 @@
 * Related Document: See README.md
 *
 ********************************************************************************
-* Copyright 2023, Cypress Semiconductor Corporation (an Infineon company) or
+* Copyright 2024, Cypress Semiconductor Corporation (an Infineon company) or
 * an affiliate of Cypress Semiconductor Corporation.  All rights reserved.
 *
 * This software, including source code, documentation and related
@@ -67,11 +67,73 @@
 #include "SelfTest_IO.h"
 #include "SelfTest_ConfigRegisters.h"
 
+
+/*******************************************************************************
+* Global Variables
+*******************************************************************************/
+/*Index for IPs*/
+uint8_t ip_index = 1u;
+/* Array to set shifts for March RAM test. */
+uint8_t stack_restore_buff[4096] = {0u};
+#if defined (__ICCARM__)
+#if (FLASH_TEST_MODE == FLASH_TEST_FLETCHER64)
+CY_SECTION(".flash_checksum") const uint64_t flash_StoredCheckSum = 0x3AA72D8E46BE6A0D;
+#endif
+#if (FLASH_TEST_MODE == FLASH_TEST_CRC32)
+CY_SECTION(".flash_checksum") const uint64_t flash_StoredCheckSum = 0x2bb718d655ca26d;
+#endif
+#else
+#if (FLASH_TEST_MODE == FLASH_TEST_FLETCHER64)
+CY_SECTION(".flash_checksum")  uint64_t flash_StoredCheckSum = 0x19AF3D7B846D3685;
+#endif
+#if (FLASH_TEST_MODE == FLASH_TEST_CRC32)
+CY_SECTION(".flash_checksum") uint64_t flash_StoredCheckSum = 0x2bb718d655ca26d;
+#endif
+#endif
+
+#if defined (__ICCARM__)
+#pragma optimize=none
+void test()
+{
+    SelfTest_Flash_init(CY_FLASH_BASE,FLASH_END_ADDR,flash_StoredCheckSum);
+}
+#endif
+
+/*****************************************************************************
+* Function Name: IAR_Flash_Init
+******************************************************************************
+* Summary:
+* The function ensures that compiler optimizations are not done for IAR
+* compiler in the release mode.
+*
+* Parameters:
+*  void
+*
+* Return:
+*  void
+*****************************************************************************/
+#if defined (__ICCARM__)
+#pragma optimize=none
+void IAR_Flash_Init()
+{
+    SelfTest_Flash_init(CY_FLASH_BASE,FLASH_END_ADDR,flash_StoredCheckSum);
+}
+#endif
+
 /*******************************************************************************
 * Macros
 ********************************************************************************/
-
+/*The size of RAM/ STACK block to be tested. */
+#define BLOCK_SIZE                1024
+/*The size of buffer which is used to store/restore. */
+#define BUFFER_SIZE               1024
 #define MAX_INDEX_VAL (0xFFF0u)
+#define PATTERN_BLOCK_SIZE (8u)
+#define DEVICE_SRAM_BASE     (0x20000000)
+#define DEVICE_STACK_SIZE    (0x00000400)
+#define DEVICE_SRAM_SIZE     (0x00008000)
+#define DEVICE_STACK_BASE    (DEVICE_SRAM_BASE + DEVICE_SRAM_SIZE)
+
 
 /* Print Test Result*/
 #define PRINT_TEST_RESULT(test_name, status) \
@@ -106,12 +168,6 @@ static uint8_t ret = 0u;;
 
 static uint16_t count = 0u;
 
-/* Array to set shifts for March RAM test. */
-static uint8_t shiftArrayRam[] = {5u, 0u};
-
-/* Array to set shifts for March Stack test. */
-static uint8_t shiftArrayStack[] = {5u, 0u};
-
 /*******************************************************************************
 * Function Prototypes
 ********************************************************************************/
@@ -121,9 +177,10 @@ static void Interrupt_Test(void);
 static void IO_Test(void);
 static void SRAM_March_Test(void);
 static void Stack_March_Test(void);
-static void Save_Startup_Registers(void);
+static void Stack_Memory_Test(void);
 static void Interrupt_test_Init(void);
 static void clock_test_init(void);
+static void Start_Up_Test(void);
 
 /*******************************************************************************
 * Function Name: main
@@ -178,6 +235,9 @@ int main(void)
     printf("\x1b[2J\x1b[;H");
     printf("\r\nClass-B Safety Test: Core Peripheral Resources\r\n");
 
+    /* Start Up Test */
+    Start_Up_Test();
+
     /* Program counter Test */
     ret = SelfTest_PC();
     
@@ -202,37 +262,24 @@ int main(void)
     IO_Test();
 
 #if (STARTUP_CFG_REGS_MODE == CFG_REGS_TO_FLASH_MODE)
-    Save_Startup_Registers();
+    //Save_Startup_Registers();
 #endif /* End (STARTUP_CFG_REGS_MODE == CFG_REGS_TO_FLASH_MODE) */
 
     SRAM_March_Test();
 
     Stack_March_Test();
 
+    /* Stack Overflow and Underflow Test */
+    Stack_Memory_Test();
+
+
     /***************************************************************************
      * Run-time test to verify whether the stack overflowed or configuration
      * registers are not corrupted.
      **************************************************************************/
 
-    /* Initialize Stack upper area with some test pattern for SelfTest */
-    SelfTests_Init_Stack_Test();
-
     for (;;)
     {
-        /* Stack overflow Self Test */
-        if (OK_STATUS != SelfTests_Stack_Check())
-        {
-            /* Process error */
-            printf("\r\nStack Overflow : Error\r\n");
-        }
-
-        /* Startup Config registers test: Compares current value with stored value */
-        if (OK_STATUS != SelfTests_StartUp_ConfigReg())
-        {
-            /* Process error */
-            printf("\r\nStartUp Config Registers : Error\r\n");
-        }
-
         /* Print test counter */
         printf("\rPerforming run-time tests.. count: %d", count);
 
@@ -284,6 +331,49 @@ static void Clock_Test(void)
 }
 
 /*****************************************************************************
+* Function Name: Memory_Test
+******************************************************************************
+* Summary:
+* Memory Test: Testing memory using Self Tests...
+*
+* Parameters:
+*  void
+*
+* Return:
+*  void
+*****************************************************************************/
+static void Stack_Memory_Test(void)
+{
+    /* Init Stack SelfTest */
+    SelfTests_Init_Stack_Range((uint16_t*)DEVICE_STACK_BASE, DEVICE_STACK_SIZE, PATTERN_BLOCK_SIZE);
+    if(ERROR_STATUS == ret)
+    {
+        printf("\r\n");
+    }
+    /*******************************/
+    /* Run Stack Self Test...      */
+    /*******************************/
+    uint8_t ret = SelfTests_Stack_Check_Range((uint16_t*)DEVICE_STACK_BASE, DEVICE_STACK_SIZE);
+    if ((ERROR_STACK_OVERFLOW & ret))
+    {
+         /* Process error */
+        PRINT_TEST_RESULT("Stack Overflow", ret);
+    }
+    else if ((ERROR_STACK_UNDERFLOW & ret))
+    {
+        ret = ERROR_STATUS;
+         /* Process error */
+        PRINT_TEST_RESULT("Stack Underflow", ret);
+    }
+
+    else
+    {
+        PRINT_TEST_RESULT("Stack Memory", ret);
+    }
+    ip_index++;
+}
+
+/*****************************************************************************
 * Function Name: Flash_Test
 ******************************************************************************
 * Summary:
@@ -300,10 +390,15 @@ static void Flash_Test(void)
 {
     /* Variable for output calculated Flash Checksum */
     uint8_t flash_CheckSum_temp;
+#if defined (__ICCARM__)
+    IAR_Flash_Init();
+#else
+    SelfTest_Flash_init(CY_FLASH_BASE,FLASH_END_ADDR,flash_StoredCheckSum);
+#endif
 
     for(;;)
     {
-        ret =  SelfTest_FlashCheckSum(FLASH_DOUBLE_WORDS_TO_TEST);
+        ret = SelfTest_FlashCheckSum(FLASH_DOUBLE_WORDS_TO_TEST);
 
         PRINT_TEST_RESULT("Flash", ret);
 
@@ -409,59 +504,26 @@ static void IO_Test(void)
 *****************************************************************************/
 static void SRAM_March_Test(void)
 {
-    uint8_t shiftIndexRam = 0u;
-
-    /* Init SRAM March Self test */
-    SelfTests_Init_March_SRAM_Test(0u);
-
-    for (;;)
+    uint8_t restore_buff[BUFFER_SIZE] = {0u};
+    if(ERROR_STATUS == ret)
     {
-        ret = SelfTests_SRAM_March();
-
-        if (ERROR_STATUS == ret)
-        {
-            /*Process error*/
-            printf("\r\nSRAM March test: error\r\n");
-            break;
-        }
-
-        /* If all RAM tested we can change shift */
-        else if(PASS_COMPLETE_STATUS == ret)
-        {
-            printf("\r\nSRAM March test Index: %d ", shiftIndexRam);
-
-            /* Check if boundaries of "shiftArrayRam" has not been completed */
-            if(shiftIndexRam >= (sizeof(shiftArrayRam) - 1u))
-            {
-                /* if boundaries of "shiftArrayRam" has been completed -reset Index */
-                shiftIndexRam = 0;
-                break;
-            }
-            else
-            {
-                /* If no - increase Index */
-                shiftIndexRam++;
-                /* Initialize SRAM March test with new shift : update Test_SRAM_Addr in .s file*/
-                SelfTests_Init_March_SRAM_Test(shiftArrayRam[shiftIndexRam]);
-            }
-        }
-        else
-        {
-            /* Do Nothing */
-        }
+        printf("\r\n");
     }
-    if (PASS_COMPLETE_STATUS == ret)
-    {
-        printf("\r\nSRAM March test : success\r\n");
-    }
+    __disable_irq();
+
+    ret = SelfTest_SRAM(SRAM_MARCH_TEST_MODE,(uint8_t *)DEVICE_SRAM_BASE,BLOCK_SIZE,(uint8_t *)restore_buff,BUFFER_SIZE);
+
+    __enable_irq();
+
+    PRINT_TEST_RESULT("SRAM March", ret);
+
 }
-
 
 /*****************************************************************************
 * Function Name: Stack_March_Test
 ******************************************************************************
 * Summary:
-* Stack March Test: Testing Stack using March Self Tests...
+* Stack March Test: Testing Stack using March Self Tests.
 *
 * Parameters:
 *  void
@@ -471,89 +533,15 @@ static void SRAM_March_Test(void)
 *****************************************************************************/
 static void Stack_March_Test(void)
 {
-    uint8_t shiftIndexStack = 0u;
+    __disable_irq();
 
-    /* Init March Stack SelfTest */
-    SelfTests_Init_March_Stack_Test(0u);
+    ret = SelfTest_SRAM_Stack((uint8_t *)DEVICE_STACK_BASE,(uint32_t)DEVICE_STACK_SIZE,stack_restore_buff);
 
-    for(;;)
-    {
-        ret = SelfTests_Stack_March();
+    __enable_irq();
 
-        if(ERROR_STATUS == ret)
-        {
-            /* Process error */
-            printf("\r\nStack March test: error\r\n");
-            break;
-        }
-
-        /* If all Stack tested we can change shift */
-        else if(PASS_COMPLETE_STATUS == ret)
-        {
-            printf("\r\nStack March test Index: %d ", shiftIndexStack);
-
-            /* Check if boundaries of "shiftArrayStack" has not been completed */
-            if(shiftIndexStack >= (sizeof(shiftArrayStack) - 1u))
-            {
-                /* if boundaries of "shiftArrayStack" has been completed -reset Index */
-                shiftIndexStack = 0;
-                break;
-            }
-            else
-            {
-                /* If no - increase Index */
-                shiftIndexStack++;
-                /* Initialize Stack March test with new shift : update Test_Stack_Addr in .s file*/
-                SelfTests_Init_March_Stack_Test(shiftArrayStack[shiftIndexStack]);
-            }
-        }
-        else
-        {
-            /* Do Nothing */
-        }
-    }
-
-    if (PASS_COMPLETE_STATUS == ret)
-    {
-        printf("\r\nStack March test : success\r\n");
-    }
-
+     /*Process error*/
+    PRINT_TEST_RESULT("Stack March", ret);
 }
-
-
-/***************************************************************************
- * Function Name: Save_Startup_Registers
- ***************************************************************************
-* Summary: Save Startup config registers to retain its value.
-*
-* Supports two self test modes:
-* CFG_REGS_TO_FLASH_MODE - Stores duplicates of registers to FLASH and compares
-*                      duplicates with actual registers value. Registers values
-*                      can be restored in this mode.
-* CFG_REGS_CRC_MODE - Calculates registers CRC and stores to FLASH; Recalculates
-*                     CRC and compares with saved CRC.
-*
-* Parameters:
-*  void
-*
-* Return:
-*  void
-*****************************************************************************/
-#if (STARTUP_CFG_REGS_MODE == CFG_REGS_TO_FLASH_MODE)
-
-static void Save_Startup_Registers(void)
-{
-    if (CY_FLASH_DRV_SUCCESS  != SelfTests_Save_StartUp_ConfigReg())
-    {
-        /* Process error */
-        printf("\r\nSave Start-Up Config Registers: error\r\n");
-    }
-    else
-    {
-        printf("\r\nSave Start-Up Config Registers: success\r\n");
-    }
-}
-#endif /* End (STARTUP_CFG_REGS_MODE == CFG_REGS_TO_FLASH_MODE) */
 
 
 /******************************************************************************
@@ -675,4 +663,52 @@ static void clock_test_init(void)
 
 }
 
+/*****************************************************************************
+* Function Name: Start_Up_Test
+******************************************************************************
+* Summary:
+* Start Up Test : This function checks the startup configuration registers.
+*
+* Parameters:
+*  void
+*
+* Return:
+*  void
+*****************************************************************************/
+static void Start_Up_Test(void)
+{
+    if(ERROR_STATUS == ret)
+    {
+        printf("\r\n");
+    }
+#if COMPONENT_CAT1A
+    /* This function initilizes the AREF address depending on the device.*/
+    SelfTests_Init_StartUp_ConfigReg();
+#endif
+
+#if (STARTUP_CFG_REGS_MODE == CFG_REGS_TO_FLASH_MODE)
+
+    /*******************************/
+    /* Save Start-Up registers...  */
+    /*******************************/
+    if (CY_FLASH_DRV_SUCCESS  != SelfTests_Save_StartUp_ConfigReg())
+    {
+        /* Process error */
+        printf("Error: Can't save Start-Up Config Registers\r\n");
+    }
+
+#endif /* End (STARTUP_CFG_REGS_MODE == CFG_REGS_TO_FLASH_MODE) */
+    /**********************************/
+    /* Run Start-Up regs Self Test... */
+    /**********************************/
+    ret = SelfTests_StartUp_ConfigReg();
+
+    /* Process error */
+    PRINT_TEST_RESULT("Start-Up Register",ret);
+    if(ERROR_STATUS == ret)
+    {
+        printf("\r\n");
+    }
+
+}
 /* [] END OF FILE */

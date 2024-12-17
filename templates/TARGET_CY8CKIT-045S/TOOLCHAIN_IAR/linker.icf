@@ -121,6 +121,8 @@ do not initialize  { section .noinit, section .intvec_ram };
 place at start of   IROM1_region  { block RO };
 ".cy_app_header" : place in IROM1_region  { section .cy_app_header };
 
+".flash_checksum" : place at address (0x0003FFF8) {readonly section .flash_checksum }; 
+
 /* RAM */
 place at start of IRAM1_region  { readwrite section .intvec_ram};
 place in          IRAM1_region  { readwrite };
